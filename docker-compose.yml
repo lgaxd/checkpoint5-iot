@@ -1,0 +1,32 @@
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: mosquitto
+    ports:
+      - "1883:1883"
+    volumes:
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+
+  n8n:
+    image: n8nio/n8n:1.123.84
+    container_name: n8n
+    depends_on:
+      - mosquitto
+    ports:
+      - "5678:5678"
+    env_file: .env
+    environment:
+      - N8N_BLOCK_ENV_ACCESS_IN_NODE=false
+      - NODE_FUNCTION_ALLOW_BUILTIN=fs
+      - N8N_RUNNERS_ENABLED=false
+      - N8N_SECURE_COOKIE=false
+      - GENERIC_TIMEZONE=America/Sao_Paulo
+      - TZ=America/Sao_Paulo
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - ./data:/data
+      - ./n8n:/seed:ro
+    entrypoint: ["/bin/sh", "/seed/init.sh"]
+
+volumes:
+  n8n_data:

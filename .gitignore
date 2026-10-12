@@ -1,0 +1,15 @@
+# Segredos
+.env
+
+# Dados gerados em execução
+data/historico.json
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Sistema / editor
+.DS_Store
+Thumbs.db
+.vscode/

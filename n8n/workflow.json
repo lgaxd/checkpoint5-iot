@@ -1,0 +1,316 @@
+{
+ "id": "motor-monitor",
+ "name": "Monitoramento Inteligente - MOTOR_01",
+ "active": false,
+ "nodes": [
+  {
+   "id": "n1",
+   "name": "MQTT fabrica/motor01/status",
+   "type": "n8n-nodes-base.mqttTrigger",
+   "typeVersion": 1,
+   "position": [
+    0,
+    0
+   ],
+   "parameters": {
+    "topics": "fabrica/motor01/status",
+    "options": {
+     "jsonParseBody": true,
+     "onlyMessage": true
+    }
+   },
+   "credentials": {
+    "mqtt": {
+     "id": "cred-mqtt",
+     "name": "Mosquitto local"
+    }
+   }
+  },
+  {
+   "id": "n2",
+   "name": "Analisar regras",
+   "type": "n8n-nodes-base.code",
+   "typeVersion": 2,
+   "position": [
+    260,
+    0
+   ],
+   "parameters": {
+    "jsCode": "// Regras DETERMINÍSTICAS (o LLM não decide o status). Também valida o dado e mantém o histórico em JSON.\nconst fs = require('fs');\nconst ARQ = '/data/historico.json';\n// o MQTT Trigger (onlyMessage) entrega o payload dentro de um array; também tratamos string/{message}\nlet d = $input.first().json;\nif (Array.isArray(d)) d = d[0];\nif (d && d.message !== undefined && d.id_maquina === undefined) d = d.message;\nif (typeof d === 'string') { try { d = JSON.parse(d); } catch (e) { d = {}; } }\nd = d || {};\n\nconst num = ['temperatura', 'vibracao', 'tensao', 'corrente', 'fator_potencia', 'taxa_producao', 'taxa_producao_esperada'];\nconst invalidos = num.filter(c => typeof d[c] !== 'number' || !isFinite(d[c]));\nif (!d.id_maquina) invalidos.unshift('id_maquina');\n// plausibilidade física: sensor com defeito/ruído não vira \"decisão inteligente\"\nif (!invalidos.length) {\n  if (d.fator_potencia < 0 || d.fator_potencia > 1) invalidos.push('fator_potencia fora de 0..1');\n  if (d.temperatura < -50 || d.temperatura > 300) invalidos.push('temperatura fora de -50..300');\n  if (d.vibracao < 0) invalidos.push('vibracao negativa');\n  if (d.taxa_producao_esperada <= 0) invalidos.push('taxa_producao_esperada <= 0');\n}\nif (invalidos.length) {\n  return [{ json: { id_maquina: d.id_maquina || 'DESCONHECIDA', situacao: 'DADO_INVALIDO',\n    problemas: [], campos_invalidos: invalidos, canais: [] } }];\n}\n\nconst problemas = [];\nlet producaoEletrico = false;\nif (d.temperatura > 80) problemas.push('Temperatura elevada');\nif (d.vibracao > 7) problemas.push('Vibração elevada');\nif (d.fator_potencia < 0.70) { problemas.push('Fator de potência baixo'); producaoEletrico = true; }\nif (d.taxa_producao < 0.8 * d.taxa_producao_esperada) { problemas.push('Produção abaixo do esperado'); producaoEletrico = true; }\n\nconst situacao = problemas.length ? 'ALERTA' : 'NORMAL';\n// temperatura/vibração -> Telegram; produção/fator de potência -> Telegram + e-mail\nconst canais = [];\nif (situacao === 'ALERTA') { canais.push('telegram'); if (producaoEletrico) canais.push('email'); }\n\n// histórico simples em JSON\nlet hist = [];\ntry { hist = JSON.parse(fs.readFileSync(ARQ, 'utf8')); } catch (e) { hist = []; }\nconst anteriores = hist.filter(h => h.id_maquina === d.id_maquina).slice(-5);\nlet variacao = null;\nif (anteriores.length) {\n  const media = anteriores.reduce((s, h) => s + h.temperatura, 0) / anteriores.length;\n  variacao = Math.round(((d.temperatura - media) / media) * 1000) / 10;\n}\nhist.push({ ts: new Date().toISOString(), id_maquina: d.id_maquina, temperatura: d.temperatura,\n  vibracao: d.vibracao, fator_potencia: d.fator_potencia, taxa_producao: d.taxa_producao, situacao });\ntry { fs.writeFileSync(ARQ, JSON.stringify(hist.slice(-100), null, 1)); } catch (e) {}\n\nreturn [{ json: { ...d, situacao, problemas, canais,\n  variacao_temp_pct_vs_ultimas_leituras: variacao, leituras_anteriores: anteriores.length } }];\n"
+   }
+  },
+  {
+   "id": "n3",
+   "name": "É ALERTA?",
+   "type": "n8n-nodes-base.if",
+   "typeVersion": 2,
+   "position": [
+    520,
+    0
+   ],
+   "parameters": {
+    "conditions": {
+     "options": {
+      "caseSensitive": true,
+      "leftValue": "",
+      "typeValidation": "strict"
+     },
+     "conditions": [
+      {
+       "id": "c1",
+       "leftValue": "={{ $json.situacao }}",
+       "rightValue": "ALERTA",
+       "operator": {
+        "type": "string",
+        "operation": "equals"
+       }
+      }
+     ],
+     "combinator": "and"
+    },
+    "options": {}
+   }
+  },
+  {
+   "id": "n4",
+   "name": "Sem ação (NORMAL / dado inválido)",
+   "type": "n8n-nodes-base.noOp",
+   "typeVersion": 1,
+   "position": [
+    780,
+    200
+   ],
+   "parameters": {}
+  },
+  {
+   "id": "n5",
+   "name": "Agente de manutenção",
+   "type": "@n8n/n8n-nodes-langchain.agent",
+   "typeVersion": 1.7,
+   "position": [
+    780,
+    -80
+   ],
+   "parameters": {
+    "promptType": "define",
+    "text": "={{ 'Análise determinística recebida:\\n' + JSON.stringify($json, null, 2) }}",
+    "options": {
+     "systemMessage": "Você é um agente de manutenção industrial. Você recebe uma análise JÁ CALCULADA de forma determinística (status e problemas). NÃO recalcule nem altere o status e NUNCA invente valores: use somente os dados fornecidos. Se algo faltar, diga que é necessária ajuda humana.\n\nPassos obrigatórios, nesta ordem:\n1. Chame a ferramenta consultar_historico (argumento: id da máquina) para contextualizar a tendência.\n2. Escreva o relatório no formato exato:\nMáquina: <id>\nSituação: ALERTA\nProblemas identificados:\n- <um item por problema>\nRECOMENDAÇÃO: <ação objetiva de manutenção, 1 a 2 frases, coerente com os problemas e o histórico>\n3. Chame enviar_telegram com o relatório completo (campo mensagem).\n4. SOMENTE se o campo canais contiver \"email\", chame também enviar_email (assunto: \"ALERTA <id>: <problemas resumidos>\", corpo: o relatório completo).\nNão chame nenhuma outra ferramenta. Ao final, responda com o relatório e a lista de ferramentas acionadas.",
+     "maxIterations": 8
+    }
+   }
+  },
+  {
+   "id": "n6",
+   "name": "Gemini",
+   "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+   "typeVersion": 1,
+   "position": [
+    700,
+    300
+   ],
+   "parameters": {
+    "modelName": "models/__GEMINI_MODEL__",
+    "options": {
+     "temperature": 0.2
+    }
+   },
+   "credentials": {
+    "googlePalmApi": {
+     "id": "cred-gemini",
+     "name": "Gemini"
+    }
+   }
+  },
+  {
+   "id": "n7",
+   "name": "Cliente MCP",
+   "type": "@n8n/n8n-nodes-langchain.mcpClientTool",
+   "typeVersion": 1,
+   "position": [
+    920,
+    300
+   ],
+   "parameters": {
+    "sseEndpoint": "http://localhost:5678/mcp/motor-mcp/sse",
+    "authentication": "none",
+    "include": "all"
+   }
+  },
+  {
+   "id": "n8",
+   "name": "Servidor MCP",
+   "type": "@n8n/n8n-nodes-langchain.mcpTrigger",
+   "typeVersion": 1,
+   "position": [
+    0,
+    500
+   ],
+   "parameters": {
+    "path": "motor-mcp"
+   },
+   "webhookId": "motor-mcp-0001"
+  },
+  {
+   "id": "n9",
+   "name": "enviar_telegram",
+   "type": "n8n-nodes-base.httpRequestTool",
+   "typeVersion": 4.2,
+   "position": [
+    -300,
+    760
+   ],
+   "parameters": {
+    "toolDescription": "Envia uma mensagem de alerta ao operador no Telegram. Argumento: mensagem (texto completo).",
+    "method": "POST",
+    "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+    "sendBody": true,
+    "specifyBody": "json",
+    "jsonBody": "={{ JSON.stringify({ chat_id: $env.TELEGRAM_CHAT_ID, text: $fromAI('mensagem', 'Texto completo do alerta', 'string') }) }}",
+    "options": {}
+   }
+  },
+  {
+   "id": "n10",
+   "name": "enviar_email",
+   "type": "n8n-nodes-base.emailSendTool",
+   "typeVersion": 2.1,
+   "position": [
+    0,
+    760
+   ],
+   "parameters": {
+    "descriptionType": "manual",
+    "toolDescription": "Envia relatório detalhado de alerta por e-mail. Argumentos: assunto e corpo.",
+    "fromEmail": "={{ $env.SMTP_USER }}",
+    "toEmail": "={{ $env.EMAIL_TO }}",
+    "subject": "={{ $fromAI('assunto', 'Assunto do e-mail', 'string') }}",
+    "emailFormat": "text",
+    "text": "={{ $fromAI('corpo', 'Corpo do relatório de alerta', 'string') }}",
+    "options": {}
+   },
+   "credentials": {
+    "smtp": {
+     "id": "cred-smtp",
+     "name": "SMTP Gmail"
+    }
+   }
+  },
+  {
+   "id": "n11",
+   "name": "consultar_historico",
+   "type": "@n8n/n8n-nodes-langchain.toolCode",
+   "typeVersion": 1.1,
+   "position": [
+    300,
+    760
+   ],
+   "parameters": {
+    "name": "consultar_historico",
+    "description": "Consulta o histórico recente (últimas 10 leituras, média e desvio padrão da temperatura) de uma máquina. Entrada: id da máquina, ex.: MOTOR_01.",
+    "language": "javaScript",
+    "jsCode": "// Ferramenta MCP: consulta o histórico da máquina (JSON local)\nconst fs = require('fs');\nlet hist = [];\ntry { hist = JSON.parse(fs.readFileSync('/data/historico.json', 'utf8')); } catch (e) {}\nconst id = String(query || '').trim();\nconst itens = hist.filter(h => !id || h.id_maquina === id).slice(-10);\nif (!itens.length) return 'Sem histórico para ' + (id || 'a máquina') + '.';\nconst temps = itens.map(h => h.temperatura);\nconst media = temps.reduce((a, b) => a + b, 0) / temps.length;\nconst dp = Math.sqrt(temps.reduce((a, b) => a + (b - media) ** 2, 0) / temps.length);\nreturn JSON.stringify({ leituras: itens.length, temperatura_media: +media.toFixed(1),\n  temperatura_desvio_padrao: +dp.toFixed(2), ultimas: itens });\n"
+   }
+  }
+ ],
+ "connections": {
+  "MQTT fabrica/motor01/status": {
+   "main": [
+    [
+     {
+      "node": "Analisar regras",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Analisar regras": {
+   "main": [
+    [
+     {
+      "node": "É ALERTA?",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "É ALERTA?": {
+   "main": [
+    [
+     {
+      "node": "Agente de manutenção",
+      "type": "main",
+      "index": 0
+     }
+    ],
+    [
+     {
+      "node": "Sem ação (NORMAL / dado inválido)",
+      "type": "main",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Gemini": {
+   "ai_languageModel": [
+    [
+     {
+      "node": "Agente de manutenção",
+      "type": "ai_languageModel",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "Cliente MCP": {
+   "ai_tool": [
+    [
+     {
+      "node": "Agente de manutenção",
+      "type": "ai_tool",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "enviar_telegram": {
+   "ai_tool": [
+    [
+     {
+      "node": "Servidor MCP",
+      "type": "ai_tool",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "enviar_email": {
+   "ai_tool": [
+    [
+     {
+      "node": "Servidor MCP",
+      "type": "ai_tool",
+      "index": 0
+     }
+    ]
+   ]
+  },
+  "consultar_historico": {
+   "ai_tool": [
+    [
+     {
+      "node": "Servidor MCP",
+      "type": "ai_tool",
+      "index": 0
+     }
+    ]
+   ]
+  }
+ },
+ "settings": {
+  "executionOrder": "v1"
+ }
+}

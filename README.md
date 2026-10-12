@@ -1,8 +1,11 @@
 # Checkpoint 5 – Monitoramento Inteligente de uma Máquina Industrial
 
-**FIAP – Graduação em Tecnologia | IoT + Agentes de IA**
-**Aluno responsável:** Lucas Grillo Alcântara – RM 561413
-**Vídeo de demonstração:** [ADICIONAR LINK DO YOUTUBE AQUI](https://www.youtube.com/watch?v=SEU_VIDEO_ID)
+| | |
+|---|---|
+| **Instituição** | FIAP – Graduação em Tecnologia |
+| **Disciplina** | IoT + Agentes de IA |
+| **Aluno responsável** | Lucas Grillo Alcântara – RM 561413 |
+| **Vídeo de demonstração** | [https://www.youtube.com/watch?v=8C_Siw3V8Bk](https://www.youtube.com/watch?v=8C_Siw3V8Bk) |
 
 ---
 
